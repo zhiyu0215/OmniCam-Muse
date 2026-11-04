@@ -1,0 +1,137 @@
+name: Sync & Build OmniCam Muse
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      updated: ${{ steps.sync.outputs.updated }}
+      commits: ${{ steps.commits.outputs.log }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 同步原仓库
+        id: sync
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/benbaobaoshigemi/OmniCam-Muse.git
+          git fetch upstream main
+          if git diff --quiet HEAD upstream/main; then
+            echo "updated=false" >> $GITHUB_OUTPUT
+            echo "原仓库无更新"
+          else
+            git log --pretty=format:"- %s（%h）" HEAD..upstream/main | head -50 > commits.txt
+            git merge upstream/main
+            git push origin main
+            echo "updated=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 整理本次更新内容
+        id: commits
+        if: steps.sync.outputs.updated == 'true'
+        run: |
+          {
+            echo "log<<UPDATE_LOG_EOF"
+            echo "本次原仓库的改动："
+            echo ""
+            cat commits.txt
+            echo "UPDATE_LOG_EOF"
+          } >> $GITHUB_OUTPUT
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.updated == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      OMNICAM_STORE_PASSWORD: ${{ secrets.OMNICAM_STORE_PASSWORD }}
+      OMNICAM_KEY_ALIAS: ${{ secrets.OMNICAM_KEY_ALIAS }}
+      OMNICAM_KEY_PASSWORD: ${{ secrets.OMNICAM_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装 Python 依赖
+        run: pip install numpy pycryptodome
+
+      - name: 安装 NDK 和 CMake
+        shell: cmd
+        run: call "%ANDROID_HOME%\cmdline-tools\latest\bin\sdkmanager.bat" --yes "ndk;29.0.14206865" "cmake;3.22.1"
+
+      - name: 还原签名证书
+        shell: pwsh
+        run: |
+          if (-not "${{ secrets.KEYSTORE_BASE64 }}") { throw '缺少 KEYSTORE_BASE64，请先在仓库密钥中配置' }
+          [IO.File]::WriteAllBytes("$env:GITHUB_WORKSPACE\port.keystore", [Convert]::FromBase64String("${{ secrets.KEYSTORE_BASE64 }}"))
+
+      - name: 指定证书路径
+        shell: pwsh
+        run: echo "OMNICAM_KEYSTORE=${{ github.workspace }}\port.keystore" >> $env:GITHUB_ENV
+
+      - name: 读取版本号
+        shell: pwsh
+        run: |
+          $v = ((Get-Content module/module.prop | Where-Object { $_ -like 'version=*' }) -replace '^version=(Muse )?', '').Trim()
+          echo "version=$v" >> $env:GITHUB_ENV
+
+      - name: 构建
+        shell: pwsh
+        run: .\build.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OmniCam-Muse
+          path: |
+            OmniCam-Muse-*-KSU.zip
+            app/build/outputs/apk/release/*.apk
+
+      - name: 发布到 Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: muse-${{ env.version }}-build.${{ github.run_number }}
+          name: OmniCam Muse ${{ env.version }}（自动构建）
+          body: |
+            原仓库版本 ${{ env.version }}，自动同步并构建。
+
+            ${{ needs.sync.outputs.commits }}
+          files: |
+            OmniCam-Muse-*-KSU.zip
+            app/build/outputs/apk/release/*.apk
+
+      - name: 发送邮件通知
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.qq.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USER }}
+          password: ${{ secrets.MAIL_PASS }}
+          subject: "OmniCam Muse ${{ env.version }} 构建好了"
+          body: |
+            原仓库更新，你的 Fork 已自动同步并完成构建，发布在 Release 页：
+
+            ${{ github.server_url }}/${{ github.repository }}/releases
+
+            ${{ needs.sync.outputs.commits }}
+
+            模块包：OmniCam-Muse-${{ env.version }}-KSU.zip
+          to: ${{ secrets.MAIL_TO }}
+          from: ${{ secrets.MAIL_USER }}
