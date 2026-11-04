@@ -89,6 +89,11 @@ jobs:
           $v = ((Get-Content module/module.prop | Where-Object { $_ -like 'version=*' }) -replace '^version=(Muse )?', '').Trim()
           echo "version=$v" >> $env:GITHUB_ENV
 
+
+      - name: 预热依赖缓存
+        shell: pwsh
+        run: .\gradlew.bat :app:assembleRelease --console=plain
+
       - name: 构建
         shell: pwsh
         run: .\build.ps1
