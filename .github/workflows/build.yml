@@ -72,10 +72,7 @@ jobs:
       - name: 安装 Python 依赖
         run: pip install numpy pycryptodome
 
-      - name: 安装 NDK 和 CMake
-        shell: cmd
-        run: call "%ANDROID_HOME%\cmdline-tools\latest\bin\sdkmanager.bat" --yes "ndk;29.0.14206865" "cmake;3.22.1"
-
+  
       - name: 还原签名证书
         shell: pwsh
         run: |
